@@ -5,11 +5,50 @@ from datetime import datetime, timezone, timedelta
 import logging
 from PIL import Image, ImageDraw, ImageFont
 import time
+import random
 import pytz
 from src.base_classes.sports import SportsCore
 from src.base_classes.api_extractors import ESPNFootballExtractor
 from src.base_classes.data_sources import ESPNDataSource
 import requests
+
+# ================================
+# NFL TEAM COLORS for Scoring Alerts
+# ================================
+NFL_TEAM_COLORS = {
+    "TB": ((213, 10, 10), (101, 79, 73)),
+    "DAL": ((0, 34, 68), (134, 147, 151)),
+    "KC": ((227, 24, 55), (255, 184, 28)),
+    "BUF": ((0, 51, 141), (198, 12, 48)),
+    "MIA": ((0, 142, 151), (252, 76, 2)),
+    "NE": ((0, 34, 68), (198, 12, 48)),
+    "NYJ": ((18, 87, 64), (255, 255, 255)),
+    "LV": ((0, 0, 0), (165, 172, 175)),
+    "DEN": ((251, 79, 20), (0, 34, 68)),
+    "LAC": ((0, 128, 198), (255, 194, 14)),
+    "PHI": ((0, 76, 84), (165, 172, 175)),
+    "NYG": ((1, 35, 82), (163, 13, 45)),
+    "WSH": ((90, 20, 20), (255, 182, 18)),
+    "GB": ((24, 48, 40), (255, 184, 28)),
+    "CHI": ((11, 22, 42), (200, 56, 3)),
+    "MIN": ((79, 38, 131), (255, 198, 47)),
+    "DET": ((0, 118, 182), (176, 183, 188)),
+    "SF": ((170, 0, 0), (173, 153, 93)),
+    "SEA": ((0, 34, 68), (105, 190, 40)),
+    "LAR": ((0, 53, 148), (255, 209, 0)),
+    "ARI": ((155, 35, 63), (255, 182, 18)),
+    "NO": ((16, 24, 31), (211, 188, 141)),
+    "ATL": ((167, 25, 48), (0, 0, 0)),
+    "CAR": ((0, 133, 202), (16, 24, 31)),
+    "PIT": ((16, 24, 32), (255, 182, 18)),
+    "BAL": ((26, 25, 95), (158, 124, 12)),
+    "CIN": ((251, 79, 20), (0, 0, 0)),
+    "CLE": ((49, 29, 0), (255, 60, 0)),
+    "TEN": ((12, 35, 64), (75, 146, 219)),
+    "IND": ((0, 44, 95), (255, 255, 255)),
+    "JAX": ((16, 24, 31), (215, 163, 62)),
+    "HOU": ((3, 32, 47), (167, 25, 48)),
+}
 
 class Football(SportsCore):
     """Base class for football sports with common functionality."""
@@ -135,6 +174,153 @@ class FootballLive(Football):
         self.last_display_update = 0
         self.last_log_time = 0
         self.log_interval = 300
+        
+        # Scoring alerts tracking
+        self.last_scoring_events = {}
+        self.scoring_alerts_enabled = config.get(sport_key, {}).get('scoring_alerts', True)
+        
+        # Load font for scoring animations
+        try:
+            self.alert_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+        except:
+            self.alert_font = ImageFont.load_default()
+    
+    def _check_scoring_events(self):
+        """Check all live games for scoring events and trigger animations."""
+        if not self.scoring_alerts_enabled:
+            return
+        
+        for game in self.live_games:
+            game_id = game.get('id')
+            scoring_event = game.get('scoring_event', '')
+            
+            if not scoring_event or not game_id:
+                if game_id in self.last_scoring_events:
+                    del self.last_scoring_events[game_id]
+                continue
+            
+            # Check if this is a new scoring event
+            if game_id in self.last_scoring_events and self.last_scoring_events[game_id] == scoring_event:
+                continue
+            
+            # Update tracking
+            self.last_scoring_events[game_id] = scoring_event
+            
+            # Determine which team scored
+            possession_id = game.get('possession')
+            home_id = game.get('home_id')
+            away_id = game.get('away_id')
+            
+            scoring_team = None
+            if possession_id == home_id:
+                scoring_team = game.get('home_abbr', '').upper()
+            elif possession_id == away_id:
+                scoring_team = game.get('away_abbr', '').upper()
+            
+            if not scoring_team:
+                continue
+            
+            # Only alert for favorite teams
+            if scoring_team not in [t.upper() for t in self.favorite_teams]:
+                continue
+            
+            # Trigger the animation
+            self.logger.info(f"SCORING ALERT: {scoring_team} - {scoring_event}")
+            self._trigger_scoring_animation(scoring_team, scoring_event)
+    
+    def _trigger_scoring_animation(self, team: str, scoring_event: str):
+        """Trigger the appropriate scoring animation."""
+        primary, secondary = NFL_TEAM_COLORS.get(team, ((255, 255, 255), (255, 0, 0)))
+        
+        if scoring_event == "TOUCHDOWN":
+            self._fancy_animation("TOUCHDOWN!!!", primary, secondary)
+            trigger_wled_effect(effect_id=50, intensity=200, palette=3)
+        elif scoring_event == "FIELD GOAL":
+            self._fancy_animation("FIELD GOAL!", primary, secondary)
+            trigger_wled_effect(effect_id=73, intensity=200, palette=3)
+        elif scoring_event == "PAT":
+            self._basic_animation("Extra Point", secondary)
+            trigger_wled_effect(effect_id=73, intensity=200, palette=3)
+    
+    def _fancy_animation(self, message: str, primary_color: tuple, secondary_color: tuple):
+        """Fancy animation for touchdowns and field goals."""
+        matrix = self.display_manager.matrix
+        
+        # Flash screen (3 times)
+        for _ in range(3):
+            matrix.Fill(*primary_color)
+            time.sleep(0.3)
+            matrix.Clear()
+            time.sleep(0.3)
+        
+        # Scroll text
+        self._scroll_text_animation(message, secondary_color, speed=0.03)
+        
+        # Border chase (2 cycles)
+        for _ in range(2):
+            for color in [primary_color, secondary_color]:
+                self._draw_border(color)
+                time.sleep(0.2)
+        
+        # Confetti (3 seconds)
+        for _ in range(30):
+            matrix.Clear()
+            for _ in range(20):
+                x = random.randint(0, matrix.width - 1)
+                y = random.randint(0, matrix.height - 1)
+                matrix.SetPixel(x, y,
+                    random.randint(50, 255),
+                    random.randint(50, 255),
+                    random.randint(50, 255))
+            time.sleep(0.1)
+        
+        matrix.Clear()
+    
+    def _basic_animation(self, message: str, text_color: tuple):
+        """Basic animation for extra points."""
+        self._scroll_text_animation(message, text_color, speed=0.04)
+    
+    def _scroll_text_animation(self, text: str, color: tuple, speed: float = 0.05):
+        """Scroll text across the display."""
+        matrix = self.display_manager.matrix
+        
+        # Create image for text
+        img_width = matrix.width * 3
+        img = Image.new('RGB', (img_width, matrix.height), color=(0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        # Draw text
+        text_y = matrix.height // 2 - 6
+        draw.text((matrix.width, text_y), text, font=self.alert_font, fill=color)
+        
+        # Calculate scroll distance
+        text_bbox = draw.textbbox((0, 0), text, font=self.alert_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        total_scroll = int(matrix.width + text_width + matrix.width)
+        
+        # Scroll the text
+        for x_offset in range(0, total_scroll, 2):
+            display_img = img.crop((x_offset, 0, x_offset + matrix.width, matrix.height))
+            matrix.SetImage(display_img.convert('RGB'), 0, 0)
+            time.sleep(speed)
+        
+        matrix.Clear()
+    
+    def _draw_border(self, color: tuple):
+        """Draw a border around the display."""
+        matrix = self.display_manager.matrix
+        width = matrix.width
+        height = matrix.height
+        
+        # Top and bottom
+        for x in range(width):
+            matrix.SetPixel(x, 0, *color)
+            matrix.SetPixel(x, height - 1, *color)
+        
+        # Left and right
+        for y in range(height):
+            matrix.SetPixel(0, y, *color)
+            matrix.SetPixel(width - 1, y, *color)
 
     def update(self):
         """Update live game data and handle game switching."""
@@ -270,7 +456,8 @@ class FootballLive(Football):
                              if self.current_game:
                                   self.current_game = temp_game_dict.get(self.current_game['id'], self.current_game)
 
-                        # Display update handled by main loop based on interval
+                        # CHECK FOR SCORING EVENTS - NEW LINE ADDED HERE
+                        self._check_scoring_events()
 
                     else:
                         # No live games found
@@ -295,6 +482,25 @@ class FootballLive(Football):
                 self.last_game_switch = current_time
                 self.logger.info(f"Switched live view to: {self.current_game['away_abbr']}@{self.current_game['home_abbr']}") # Changed log prefix
                 # Force display update via flag or direct call if needed, but usually let main loop handle
+
+    def trigger_wled_effect(effect_id: int = 1, intensity: int = 128, palette: int = 0):
+        try:
+            WLED_IP = "http://10.0.0.116/"  # <-- replace with your WLED controller's IP
+            url = f"http://{WLED_IP}/json/state"
+            payload = {
+                "on": True,
+                "bri": 255,
+                "seg": [{
+                    "fx": effect_id,     # effect number
+                    "sx": intensity,     # speed (0–255)
+                    "ix": 128,           # intensity (0–255)
+                    "pal": palette       # palette number
+                }]
+            }
+            requests.post(url, json=payload, timeout=2)
+        except Exception as e:
+            logging.error(f"Failed to trigger WLED effect: {e}")
+
 
     def _draw_scorebug_layout(self, game: Dict, force_clear: bool = False) -> None:
         """Draw the detailed scorebug layout for a live NCAA FB game.""" # Updated docstring
